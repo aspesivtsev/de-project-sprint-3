@@ -5,13 +5,13 @@ import pandas as pd
 
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.operators.python_operator import PythonOperator #from airflow.operators.python import PythonOperator, BranchPythonOperator
+from airflow.operators.python_operator import PythonOperator  # from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.hooks.http_hook import HttpHook #from airflow.providers.http.hooks.http import HttpHook
+from airflow.hooks.http_hook import HttpHook  # from airflow.providers.http.hooks.http import HttpHook
 from airflow.utils.task_group import TaskGroup
 
-#http request data
+# http request data
 http_conn_id = HttpHook.get_connection('http_conn_id')
 api_key = http_conn_id.extra_dejson.get('api_key')
 base_url = http_conn_id.host
@@ -31,8 +31,8 @@ headers = {
 
 
 def generate_report(ti):
-    '''sends request to generate a standard report
-    Gets task_id which is used for getting the created files.'''
+    """sends request to generate a standard report
+    Gets task_id which is used for getting the created files."""
     print('Making request generate_report')
 
     response = requests.post(f'{base_url}/generate_report', headers=headers)
@@ -43,13 +43,13 @@ def generate_report(ti):
 
 
 def get_report(ti):
-    '''gets report_id using the task_id'''
+    """gets report_id using the task_id"""
     print('Making request get_report')
     task_id = ti.xcom_pull(key='task_id')
 
     report_id = None
 
-    #makes 20 tries to get report_id
+    # makes 20 tries to get report_id
     for i in range(20):
         response = requests.get(f'{base_url}/get_report?task_id={task_id}', headers=headers)
         response.raise_for_status()
@@ -67,8 +67,9 @@ def get_report(ti):
     ti.xcom_push(key='report_id', value=report_id)
     print(f'Report_id={report_id}')
 
+
 def get_increment(date, ti):
-    '''Gets the increment'''
+    """Gets the increment"""
     print('Making request get_increment')
     report_id = ti.xcom_pull(key='report_id')
     response = requests.get(
@@ -86,7 +87,7 @@ def get_increment(date, ti):
 
 
 def upload_data_to_staging(filename, date, pg_table, pg_schema, ti):
-    '''Pushes data to staging BD'''
+    """Pushes data to staging BD"""
     increment_id = ti.xcom_pull(key='increment_id')
     s3_filename = f'https://storage.yandexcloud.net/s3-sprint3/cohort_{cohort}/{nickname}/project/{increment_id}/{filename}'
     print(s3_filename)
@@ -106,8 +107,12 @@ def upload_data_to_staging(filename, date, pg_table, pg_schema, ti):
 
     postgres_hook = PostgresHook(postgres_conn_id)
     engine = postgres_hook.get_sqlalchemy_engine()
+
+    # Remove data on the period (idempotency)
+    postgres_hook.run(f"delete from staging.user_order_log where date_time::date = '{date}'")
+
     row_count = df.to_sql(pg_table, engine, schema=pg_schema, if_exists='append', index=False)
-    print(f'{row_count} rows was inserted')
+    print(f'{row_count} rows were inserted') #it is better to use special logger https://docs.astronomer.io/learn/logging
 
 
 args = {
@@ -115,7 +120,7 @@ args = {
     'email': ['student@example.com'],
     'email_on_failure': False,
     'email_on_retry': False,
-    'retries': 0
+    'retries': 5
 }
 
 business_dt = '{{ ds }}'
@@ -127,6 +132,7 @@ with DAG(
         catchup=True,
         start_date=datetime.today() - timedelta(days=7),
         end_date=datetime.today() - timedelta(days=1),
+        max_active_runs=1,
 ) as dag:
     generate_report = PythonOperator(
         task_id='generate_report',
@@ -136,7 +142,7 @@ with DAG(
         task_id='get_report',
         python_callable=get_report)
 
-    get_increment = PythonOperator(
+    t_get_increment = PythonOperator(
         task_id='get_increment',
         python_callable=get_increment,
         op_kwargs={'date': business_dt})
@@ -145,19 +151,19 @@ with DAG(
         task_id='upload_user_order_inc',
         python_callable=upload_data_to_staging,
         op_kwargs={'date': business_dt,
-                   'filename': '.csv',
+                   'filename': 'user_order_log_inc.csv',
                    'pg_table': 'user_order_log',
                    'pg_schema': 'staging'})
 
     dimensional_sql_tasks = TaskGroup('dimensional_sql_tasks')
 
-    #creating a group task with 3 sql tasks
+    # creating a group task with 3 sql tasks
     with dimensional_sql_tasks:
         for sql_table in ['item', 'customer', 'city']:
             PostgresOperator(
-            task_id=f'update_d_{sql_table}',
-            postgres_conn_id=postgres_conn_id,
-            sql=f'sql/mart.d_{sql_table}.sql')
+                task_id=f'update_d_{sql_table}',
+                postgres_conn_id=postgres_conn_id,
+                sql=f'sql/mart.d_{sql_table}.sql')
 
     update_f_sales = PostgresOperator(
         task_id='update_f_sales',
@@ -166,11 +172,18 @@ with DAG(
         parameters={'date': {business_dt}}
     )
 
+    refresh_f_customer_retention = PostgresOperator(
+        task_id='update_f_customer_retention',
+        postgres_conn_id=postgres_conn_id,
+        sql="sql/mart.f_customer_retention.sql",
+    )
+
     (
             generate_report
             >> get_report
-            >> get_increment
+            >> t_get_increment
             >> upload_user_order_inc
             >> dimensional_sql_tasks
             >> update_f_sales
+            >> refresh_f_customer_retention
     )

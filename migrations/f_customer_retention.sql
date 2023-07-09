@@ -11,5 +11,6 @@ create table
         returning_customers_count bigint,
         returning_customers_revenue bigint,
         refunded_customer_count bigint,
-        customers_refunded bigint
+        customers_refunded bigint,
+        primary key (item_id, period_id)
     );

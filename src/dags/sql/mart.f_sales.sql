@@ -20,11 +20,11 @@ select
     customer_id,
     city_id,
     quantity,
-    payment_amount,
     case
-        when payment_amount < 0 then 'refunded'
-        else status
-    end as status
+        when status = 'refunded' then payment_amount * -1
+        else payment_amount
+    end as payment_amount,
+    status
 from
     staging.user_order_log uol
     left join mart.d_calendar as dc on uol.date_time:: Date = dc.date_actual
